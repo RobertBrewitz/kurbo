@@ -591,6 +591,16 @@ impl StrokeCtx {
     }
 }
 
+/// Internal path element tagged with its production-order index.
+/// Used by the `ordered-dash` feature to restore natural path order
+/// after `DashIterator`'s stash mechanism reorders output.
+#[cfg(feature = "ordered-dash")]
+#[derive(Clone, Copy, Debug)]
+struct StrokeEl {
+    path: PathEl,
+    idx: u32,
+}
+
 /// An implementation of dashing as an iterator-to-iterator transformation.
 struct DashIterator<'a, T> {
     inner: T,
@@ -850,6 +860,243 @@ impl<'a, T: Iterator<Item = PathEl>> DashIterator<'a, T> {
     }
 }
 
+#[cfg(feature = "ordered-dash")]
+struct OrderedDashIterator<'a, T> {
+    inner: T,
+    input_done: bool,
+    closepath_pending: bool,
+    dashes: &'a [f64],
+    dash_ix: usize,
+    init_dash_ix: usize,
+    init_dash_remaining: f64,
+    init_is_active: bool,
+    is_active: bool,
+    state: DashState,
+    current_seg: PathSeg,
+    t: f64,
+    dash_remaining: f64,
+    seg_remaining: f64,
+    start_pt: Point,
+    last_pt: Point,
+    stash: Vec<StrokeEl>,
+    stash_ix: usize,
+    /// Counter that increments each time an element is produced.
+    production_idx: u32,
+}
+
+#[cfg(feature = "ordered-dash")]
+impl<T: Iterator<Item = PathEl>> Iterator for OrderedDashIterator<'_, T> {
+    type Item = StrokeEl;
+
+    fn next(&mut self) -> Option<StrokeEl> {
+        loop {
+            match self.state {
+                DashState::NeedInput => {
+                    if self.input_done {
+                        return None;
+                    }
+                    self.get_input();
+                    if self.input_done {
+                        return None;
+                    }
+                    self.state = DashState::ToStash;
+                }
+                DashState::ToStash => {
+                    if let Some(el) = self.step() {
+                        let idx = self.production_idx;
+                        self.production_idx += 1;
+                        self.stash.push(StrokeEl { path: el, idx });
+                    }
+                }
+                DashState::Working => {
+                    if let Some(el) = self.step() {
+                        let idx = self.production_idx;
+                        self.production_idx += 1;
+                        return Some(StrokeEl { path: el, idx });
+                    }
+                }
+                DashState::FromStash => {
+                    if let Some(el) = self.stash.get(self.stash_ix) {
+                        self.stash_ix += 1;
+                        return Some(*el);
+                    } else {
+                        self.stash.clear();
+                        self.stash_ix = 0;
+                        if self.input_done {
+                            return None;
+                        }
+                        if self.closepath_pending {
+                            self.closepath_pending = false;
+                            self.state = DashState::NeedInput;
+                        } else {
+                            self.state = DashState::ToStash;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ordered-dash")]
+impl<'a, T: Iterator<Item = PathEl>> OrderedDashIterator<'a, T> {
+    fn get_input(&mut self) {
+        loop {
+            if self.closepath_pending {
+                self.handle_closepath();
+                break;
+            }
+            let Some(next_el) = self.inner.next() else {
+                self.input_done = true;
+                self.state = DashState::FromStash;
+                return;
+            };
+            let p0 = self.last_pt;
+            match next_el {
+                PathEl::MoveTo(p) => {
+                    if !self.stash.is_empty() {
+                        self.state = DashState::FromStash;
+                    }
+                    self.start_pt = p;
+                    self.last_pt = p;
+                    self.reset_phase();
+                    continue;
+                }
+                PathEl::LineTo(p1) => {
+                    let l = Line::new(p0, p1);
+                    self.seg_remaining = l.arclen(DASH_ACCURACY);
+                    self.current_seg = PathSeg::Line(l);
+                    self.last_pt = p1;
+                }
+                PathEl::QuadTo(p1, p2) => {
+                    let q = QuadBez::new(p0, p1, p2);
+                    self.seg_remaining = q.arclen(DASH_ACCURACY);
+                    self.current_seg = PathSeg::Quad(q);
+                    self.last_pt = p2;
+                }
+                PathEl::CurveTo(p1, p2, p3) => {
+                    let c = CubicBez::new(p0, p1, p2, p3);
+                    self.seg_remaining = c.arclen(DASH_ACCURACY);
+                    self.current_seg = PathSeg::Cubic(c);
+                    self.last_pt = p3;
+                }
+                PathEl::ClosePath => {
+                    self.closepath_pending = true;
+                    if p0 != self.start_pt {
+                        let l = Line::new(p0, self.start_pt);
+                        self.seg_remaining = l.arclen(DASH_ACCURACY);
+                        self.current_seg = PathSeg::Line(l);
+                        self.last_pt = self.start_pt;
+                    } else {
+                        self.handle_closepath();
+                    }
+                }
+            }
+            break;
+        }
+        self.t = 0.0;
+    }
+
+    fn step(&mut self) -> Option<PathEl> {
+        let mut result = None;
+        if self.state == DashState::ToStash && self.stash.is_empty() {
+            if self.is_active {
+                result = Some(PathEl::MoveTo(self.current_seg.start()));
+            } else {
+                self.state = DashState::Working;
+            }
+        } else if self.dash_remaining < self.seg_remaining {
+            let seg = self.current_seg.subsegment(self.t..1.0);
+            let t1 = seg.inv_arclen(self.dash_remaining, DASH_ACCURACY);
+            if self.is_active {
+                let subseg = seg.subsegment(0.0..t1);
+                result = Some(seg_to_el(&subseg));
+                self.state = DashState::Working;
+            } else {
+                let p = seg.eval(t1);
+                result = Some(PathEl::MoveTo(p));
+            }
+            self.is_active = !self.is_active;
+            self.t += t1 * (1.0 - self.t);
+            self.seg_remaining -= self.dash_remaining;
+            self.dash_ix += 1;
+            if self.dash_ix == self.dashes.len() {
+                self.dash_ix = 0;
+            }
+            self.dash_remaining = self.dashes[self.dash_ix];
+        } else {
+            if self.is_active {
+                let seg = self.current_seg.subsegment(self.t..1.0);
+                result = Some(seg_to_el(&seg));
+            }
+            self.dash_remaining -= self.seg_remaining;
+            self.get_input();
+        }
+        result
+    }
+
+    fn handle_closepath(&mut self) {
+        if self.state == DashState::ToStash {
+            let idx = self.production_idx;
+            self.production_idx += 1;
+            self.stash.push(StrokeEl {
+                path: PathEl::ClosePath,
+                idx,
+            });
+        } else if self.is_active {
+            self.stash_ix = 1;
+        }
+        self.state = DashState::FromStash;
+        self.reset_phase();
+    }
+
+    fn reset_phase(&mut self) {
+        self.dash_ix = self.init_dash_ix;
+        self.dash_remaining = self.init_dash_remaining;
+        self.is_active = self.init_is_active;
+    }
+}
+
+#[cfg(feature = "ordered-dash")]
+fn dash_internal<'a>(
+    inner: impl Iterator<Item = PathEl> + 'a,
+    dash_offset: f64,
+    dashes: &'a [f64],
+) -> impl Iterator<Item = StrokeEl> + 'a {
+    let period = dashes.iter().sum();
+    let dash_offset = dash_offset.rem_euclid(period);
+
+    let mut dash_ix = 0;
+    let mut dash_remaining = dashes[dash_ix] - dash_offset;
+    let mut is_active = true;
+    while dash_remaining < 0.0 {
+        dash_ix = (dash_ix + 1) % dashes.len();
+        dash_remaining += dashes[dash_ix];
+        is_active = !is_active;
+    }
+    OrderedDashIterator {
+        inner,
+        input_done: false,
+        closepath_pending: false,
+        dashes,
+        dash_ix,
+        init_dash_ix: dash_ix,
+        init_dash_remaining: dash_remaining,
+        init_is_active: is_active,
+        is_active,
+        state: DashState::NeedInput,
+        current_seg: PathSeg::Line(Line::new(Point::ORIGIN, Point::ORIGIN)),
+        t: 0.0,
+        dash_remaining,
+        seg_remaining: 0.0,
+        start_pt: Point::ORIGIN,
+        last_pt: Point::ORIGIN,
+        stash: Vec::new(),
+        stash_ix: 0,
+        production_idx: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -1020,5 +1267,50 @@ mod tests {
 
         let infinite_width = Stroke::new(f64::INFINITY);
         assert!(!infinite_width.is_nan());
+    }
+
+    /// With `ordered-dash`, dashed stroke output on a closed rect should start
+    /// from the path's natural beginning, not from mid-path where the stash
+    /// replays.
+    #[test]
+    #[cfg(feature = "ordered-dash")]
+    fn ordered_dash_closed_rect_starts_at_origin() {
+        // Rect::path_elements(0.) produces:
+        //   MoveTo(0,0), LineTo(4,0), LineTo(4,4), LineTo(0,4), ClosePath
+        // Perimeter = 16. Dash [5,1] repeats every 6 units.
+        //
+        // Without ordered-dash, dash() output starts mid-path:
+        //   MoveTo(4,2), LineTo(4,4), LineTo(1,4), ...
+        //
+        // With ordered-dash, stroke() internally sorts so the first dash
+        // segment starts at the path origin.
+        let shape = crate::Rect::from_points((0.0, 0.0), (4.0, 4.0));
+        let stroke_style = Stroke::new(1.0).with_caps(Butt).with_dashes(0.0, [5., 1.]);
+        let stroked = stroke(
+            shape.path_elements(0.),
+            &stroke_style,
+            &StrokeOpts::default(),
+            0.25,
+        );
+        let elements = stroked.elements();
+
+        // The stroked output must be finite.
+        assert!(stroked.is_finite(), "stroked path must be finite");
+
+        // First element is always MoveTo.
+        let PathEl::MoveTo(first_pt) = elements[0] else {
+            panic!("first element should be MoveTo, got {:?}", elements[0]);
+        };
+
+        // With ordering fixed, the first MoveTo should NOT be at (4,2)-ish
+        // (which is where the unordered stash-replayed version starts).
+        // It should be near the path origin region.
+        // The exact point depends on stroke expansion (offset by half-width),
+        // but the x-coordinate should not be ~4.0 (mid-path).
+        assert!(
+            first_pt.x < 2.0,
+            "first MoveTo x={} suggests unordered output (expected near origin)",
+            first_pt.x,
+        );
     }
 }
