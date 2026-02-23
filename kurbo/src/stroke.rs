@@ -279,12 +279,8 @@ pub fn stroke_with(
     } else {
         #[cfg(feature = "ordered-dash")]
         {
-            let mut dashed: Vec<StrokeEl> = dash_internal(
-                path.into_iter(),
-                style.dash_offset,
-                &style.dash_pattern,
-            )
-            .collect();
+            let mut dashed: Vec<StrokeEl> =
+                dash_internal(path.into_iter(), style.dash_offset, &style.dash_pattern).collect();
             dashed.sort_unstable_by_key(|el| el.idx);
             stroke_undashed(dashed.into_iter().map(|el| el.path), style, tolerance, ctx);
         }
