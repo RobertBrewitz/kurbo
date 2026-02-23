@@ -939,16 +939,19 @@ mod tests {
 
     #[test]
     fn dash_sequence() {
-        let shape = Line::new((0.0, 0.0), (21.0, 0.0));
-        let dashes = [1., 5., 2., 5.];
+        let shape = crate::Rect::from_points((0.0, 0.0), (4.0, 4.0));
+        let dashes = [5., 1.];
         let expansion = [
-            PathSeg::Line(Line::new((6., 0.), (8., 0.))),
-            PathSeg::Line(Line::new((13., 0.), (14., 0.))),
-            PathSeg::Line(Line::new((19., 0.), (21., 0.))),
-            PathSeg::Line(Line::new((0., 0.), (1., 0.))),
+            PathEl::MoveTo((4.0, 2.0).into()),
+            PathEl::LineTo((4.0, 4.0).into()),
+            PathEl::LineTo((1.0, 4.0).into()),
+            PathEl::MoveTo((0.0, 4.0).into()),
+            PathEl::LineTo((0.0, 0.0).into()),
+            PathEl::LineTo((4.0, 0.0).into()),
+            PathEl::LineTo((4.0, 1.0).into()),
         ];
-        let iter = segments(dash(shape.path_elements(0.), 0., &dashes));
-        assert_eq!(iter.collect::<Vec<PathSeg>>(), expansion);
+        let iter = dash(shape.path_elements(0.), 0., &dashes);
+        assert_eq!(iter.collect::<Vec<PathEl>>(), expansion);
     }
 
     #[test]
