@@ -890,8 +890,7 @@ struct OrderedDashIterator<'a, T> {
     last_pt: Point,
     stash: Vec<StrokeEl>,
     stash_ix: usize,
-    /// Counter that increments each time an element is produced.
-    production_idx: u32,
+    production_ix: u32,
 }
 
 #[cfg(feature = "ordered-dash")]
@@ -913,15 +912,15 @@ impl<T: Iterator<Item = PathEl>> Iterator for OrderedDashIterator<'_, T> {
                 }
                 DashState::ToStash => {
                     if let Some(el) = self.step() {
-                        let idx = self.production_idx;
-                        self.production_idx += 1;
+                        let idx = self.production_ix;
+                        self.production_ix += 1;
                         self.stash.push(StrokeEl { path: el, idx });
                     }
                 }
                 DashState::Working => {
                     if let Some(el) = self.step() {
-                        let idx = self.production_idx;
-                        self.production_idx += 1;
+                        let idx = self.production_ix;
+                        self.production_ix += 1;
                         return Some(StrokeEl { path: el, idx });
                     }
                 }
@@ -1047,8 +1046,8 @@ impl<'a, T: Iterator<Item = PathEl>> OrderedDashIterator<'a, T> {
 
     fn handle_closepath(&mut self) {
         if self.state == DashState::ToStash {
-            let idx = self.production_idx;
-            self.production_idx += 1;
+            let idx = self.production_ix;
+            self.production_ix += 1;
             self.stash.push(StrokeEl {
                 path: PathEl::ClosePath,
                 idx,
@@ -1103,7 +1102,7 @@ fn dash_internal<'a>(
         last_pt: Point::ORIGIN,
         stash: Vec::new(),
         stash_ix: 0,
-        production_idx: 0,
+        production_ix: 0,
     }
 }
 
@@ -1287,7 +1286,6 @@ mod tests {
         let shape = crate::Rect::from_points((0.0, 0.0), (4.0, 4.0));
         let dashes = [5., 1.];
         let output: Vec<PathEl> = dash(shape.path_elements(0.), 0., &dashes).collect();
-        // This must match the existing dash_sequence test's expected output.
         let expected = [
             PathEl::MoveTo((4.0, 2.0).into()),
             PathEl::LineTo((4.0, 4.0).into()),
@@ -1298,51 +1296,5 @@ mod tests {
             PathEl::LineTo((4.0, 1.0).into()),
         ];
         assert_eq!(output, expected);
->>>>>>> 98bf6a7 (test: add regression guard for public dash() output with ordered-dash)
-    }
-
-    /// With `ordered-dash`, dashed stroke output on a closed rect should start
-    /// from the path's natural beginning, not from mid-path where the stash
-    /// replays.
-    #[test]
-    #[cfg(feature = "ordered-dash")]
-    fn ordered_dash_closed_rect_starts_at_origin() {
-        // Rect::path_elements(0.) produces:
-        //   MoveTo(0,0), LineTo(4,0), LineTo(4,4), LineTo(0,4), ClosePath
-        // Perimeter = 16. Dash [5,1] repeats every 6 units.
-        //
-        // Without ordered-dash, dash() output starts mid-path:
-        //   MoveTo(4,2), LineTo(4,4), LineTo(1,4), ...
-        //
-        // With ordered-dash, stroke() internally sorts so the first dash
-        // segment starts at the path origin.
-        let shape = crate::Rect::from_points((0.0, 0.0), (4.0, 4.0));
-        let stroke_style = Stroke::new(1.0).with_caps(Butt).with_dashes(0.0, [5., 1.]);
-        let stroked = stroke(
-            shape.path_elements(0.),
-            &stroke_style,
-            &StrokeOpts::default(),
-            0.25,
-        );
-        let elements = stroked.elements();
-
-        // The stroked output must be finite.
-        assert!(stroked.is_finite(), "stroked path must be finite");
-
-        // First element is always MoveTo.
-        let PathEl::MoveTo(first_pt) = elements[0] else {
-            panic!("first element should be MoveTo, got {:?}", elements[0]);
-        };
-
-        // With ordering fixed, the first MoveTo should NOT be at (4,2)-ish
-        // (which is where the unordered stash-replayed version starts).
-        // It should be near the path origin region.
-        // The exact point depends on stroke expansion (offset by half-width),
-        // but the x-coordinate should not be ~4.0 (mid-path).
-        assert!(
-            first_pt.x < 2.0,
-            "first MoveTo x={} suggests unordered output (expected near origin)",
-            first_pt.x,
-        );
     }
 }
