@@ -277,8 +277,22 @@ pub fn stroke_with(
     if style.dash_pattern.is_empty() {
         stroke_undashed(path, style, tolerance, ctx);
     } else {
-        let dashed = dash(path.into_iter(), style.dash_offset, &style.dash_pattern);
-        stroke_undashed(dashed, style, tolerance, ctx);
+        #[cfg(feature = "ordered-dash")]
+        {
+            let mut dashed: Vec<StrokeEl> = dash_internal(
+                path.into_iter(),
+                style.dash_offset,
+                &style.dash_pattern,
+            )
+            .collect();
+            dashed.sort_unstable_by_key(|el| el.idx);
+            stroke_undashed(dashed.into_iter().map(|el| el.path), style, tolerance, ctx);
+        }
+        #[cfg(not(feature = "ordered-dash"))]
+        {
+            let dashed = dash(path.into_iter(), style.dash_offset, &style.dash_pattern);
+            stroke_undashed(dashed, style, tolerance, ctx);
+        }
     }
 }
 
