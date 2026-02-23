@@ -1283,6 +1283,28 @@ mod tests {
         assert!(!infinite_width.is_nan());
     }
 
+    /// Guard that the public `dash()` function output is unchanged
+    /// regardless of the `ordered-dash` feature flag.
+    #[test]
+    #[cfg(feature = "ordered-dash")]
+    fn ordered_dash_does_not_change_public_dash() {
+        let shape = crate::Rect::from_points((0.0, 0.0), (4.0, 4.0));
+        let dashes = [5., 1.];
+        let output: Vec<PathEl> = dash(shape.path_elements(0.), 0., &dashes).collect();
+        // This must match the existing dash_sequence test's expected output.
+        let expected = [
+            PathEl::MoveTo((4.0, 2.0).into()),
+            PathEl::LineTo((4.0, 4.0).into()),
+            PathEl::LineTo((1.0, 4.0).into()),
+            PathEl::MoveTo((0.0, 4.0).into()),
+            PathEl::LineTo((0.0, 0.0).into()),
+            PathEl::LineTo((4.0, 0.0).into()),
+            PathEl::LineTo((4.0, 1.0).into()),
+        ];
+        assert_eq!(output, expected);
+>>>>>>> 98bf6a7 (test: add regression guard for public dash() output with ordered-dash)
+    }
+
     /// With `ordered-dash`, dashed stroke output on a closed rect should start
     /// from the path's natural beginning, not from mid-path where the stash
     /// replays.
