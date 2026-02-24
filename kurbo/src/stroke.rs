@@ -1044,9 +1044,9 @@ impl<'a, T: Iterator<Item = PathEl>> OrderedDashIterator<'a, T> {
         result
     }
 
-    // DashIterator merges the first and last dashes of a closed subpath by
-    // skipping the stash's MoveTo. We can't do that here because sorting
-    // separates them, so each dash needs its own MoveTo to know where to start.
+    // DashIterator sets stash_ix = 1 here to merge the first and last dashes
+    // of a closed subpath. We skip that because sorting separates them into
+    // independent subpaths, so merging would create a large miter spike.
     fn handle_closepath(&mut self) {
         if self.state == DashState::ToStash {
             let idx = self.production_ix;
