@@ -1052,8 +1052,6 @@ impl<'a, T: Iterator<Item = PathEl>> OrderedDashIterator<'a, T> {
                 path: PathEl::ClosePath,
                 idx,
             });
-        } else if self.is_active {
-            self.stash_ix = 1;
         }
         self.state = DashState::FromStash;
         self.reset_phase();
